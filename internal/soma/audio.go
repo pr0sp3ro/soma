@@ -39,6 +39,7 @@ func startPlayer(ctx context.Context, source string, volume int, startSeconds in
 		"--no-input-default-bindings",
 		"--no-resume-playback",
 		"--ytdl-format=bestaudio/best",
+		"--ytdl-raw-options=check-formats=",
 		fmt.Sprintf("--volume=%d", volume),
 		fmt.Sprintf("--start=%d", startSeconds),
 		"--",
