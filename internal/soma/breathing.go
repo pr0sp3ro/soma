@@ -27,34 +27,36 @@ func breathe(ctx context.Context, paths Paths, config BreathingConfig, args []st
 		return err
 	}
 
-	var inhaleTone string
-	var exhaleTone string
+	var settings BreathingConfig = options.Config
+	var phases = []Phase{
+		{Name: "Inhale", Seconds: settings.Inhale},
+		{Name: "Hold after inhale", Seconds: settings.HoldIn},
+		{Name: "Exhale", Seconds: settings.Exhale},
+		{Name: "Hold after exhale", Seconds: settings.HoldOut},
+	}
 
-	if !options.Silent && options.Config.Volume > 0 {
+	if !options.Silent && settings.Volume > 0 {
 		if err := requirePlayer(false); err != nil {
 			return err
 		}
 
-		inhaleTone, err = createTone(660, 0.22)
-		if err != nil {
-			return err
-		}
-		defer os.Remove(inhaleTone)
+		var frequencies = []float64{660, 550, 440, 330}
 
-		exhaleTone, err = createTone(440, 0.22)
-		if err != nil {
-			return err
+		for index := range phases {
+			if phases[index].Seconds == 0 {
+				continue
+			}
+
+			tone, err := createTone(frequencies[index], 0.22)
+			if err != nil {
+				return err
+			}
+			defer os.Remove(tone)
+
+			phases[index].Tone = tone
 		}
-		defer os.Remove(exhaleTone)
 	}
 
-	var settings BreathingConfig = options.Config
-	var phases = []Phase{
-		{Name: "Inhale", Seconds: settings.Inhale, Tone: inhaleTone},
-		{Name: "Hold after inhale", Seconds: settings.HoldIn},
-		{Name: "Exhale", Seconds: settings.Exhale, Tone: exhaleTone},
-		{Name: "Hold after exhale", Seconds: settings.HoldOut},
-	}
 	var session = Session{
 		Kind:           "breathing",
 		PlannedSeconds: int64(options.Duration / time.Second),
@@ -137,16 +139,14 @@ func validateBreathingPhases(config BreathingConfig) error {
 }
 
 func runBreathing(ctx context.Context, options breathingOptions, phases []Phase, record *Session) error {
-	var settings BreathingConfig = options.Config
-	fmt.Printf(
-		"Breathing: %d / %d / %d / %d seconds. Ctrl+C to stop.\n",
-		settings.Inhale,
-		settings.HoldIn,
-		settings.Exhale,
-		settings.HoldOut,
-	)
+	view, err := openBreathingView()
+	if err != nil {
+		return err
+	}
+	defer view.close()
 
-	started := time.Now()
+	var settings BreathingConfig = options.Config
+	var clock = breathingClock{Started: time.Now()}
 
 	for cycle := 1; ; cycle++ {
 		for _, phase := range phases {
@@ -154,7 +154,7 @@ func runBreathing(ctx context.Context, options breathingOptions, phases []Phase,
 				continue
 			}
 
-			if err := runPhase(ctx, phase, cycle, settings.Volume); err != nil {
+			if err := runPhase(ctx, phase, cycle, options, &clock, view); err != nil {
 				return err
 			}
 		}
@@ -165,24 +165,25 @@ func runBreathing(ctx context.Context, options breathingOptions, phases []Phase,
 			return nil
 		}
 
-		if settings.Cycles == 0 && time.Since(started) >= options.Duration {
+		if settings.Cycles == 0 && clock.elapsed(time.Now()) >= options.Duration {
 			return nil
 		}
 	}
 }
 
-func runPhase(ctx context.Context, phase Phase, cycle int, volume int) error {
+func runPhase(ctx context.Context, phase Phase, cycle int, options breathingOptions, clock *breathingClock, view *breathingView) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	deadline := time.Now().Add(time.Duration(phase.Seconds) * time.Second)
+	var phaseDuration time.Duration = time.Duration(phase.Seconds) * time.Second
+	var phaseStarted time.Duration = clock.elapsed(time.Now())
 	var playbackDone <-chan struct{}
 	var player *Player
 
 	if phase.Tone != "" {
 		var err error
-		player, err = startPlayer(ctx, phase.Tone, volume, 0)
+		player, err = startPlayer(ctx, phase.Tone, options.Config.Volume, 0)
 		if err != nil {
 			return err
 		}
@@ -199,13 +200,27 @@ func runPhase(ctx context.Context, phase Phase, cycle int, volume int) error {
 			return err
 		}
 
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
+		pausePressed, err := view.readPause()
+		if err != nil {
+			return err
+		}
+
+		if pausePressed {
+			clock.togglePause(time.Now())
+
+			if clock.paused() && player != nil {
+				player.stop()
+				playbackDone = nil
+			}
+		}
+
+		var elapsed time.Duration = clock.elapsed(time.Now())
+		var remaining time.Duration = phaseDuration - (elapsed - phaseStarted)
+		if remaining <= 0 && !clock.paused() {
 			return nil
 		}
 
-		var remainingSeconds int = int((remaining + time.Second - 1) / time.Second)
-		fmt.Printf("\rCycle %d | %-18s | %2ds remaining   ", cycle, phase.Name, remainingSeconds)
+		view.render(phase, cycle, options.Config.Cycles, remaining, elapsed, clock.paused())
 
 		select {
 		case <-ctx.Done():

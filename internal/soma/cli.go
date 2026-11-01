@@ -26,6 +26,7 @@ Usage:
 
 Times use h, m and s, e.g. 20m or 2m35s. Breathing phases use seconds.
 Duration-limited breathing completes the current cycle.
+Breathing uses the full terminal. Space pauses or resumes the exercise.
 YouTube plays audio only, without any additional bells.
 Ctrl+C stops playback and saves the interrupted session.
 `
